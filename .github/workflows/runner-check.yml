@@ -1,0 +1,80 @@
+name: Oxide - Runner Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - name: Report CPU, memory, disk and tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = [System.Collections.Generic.List[string]]::new()
+          $report.Add("# Oxide runner inspection: $env:RUNNER_OS")
+          $report.Add('This report describes the temporary GitHub runner, not the developer PC.')
+          $report.Add("Image: $env:ImageOS / $env:ImageVersion")
+          $report.Add("Logical processors: $([Environment]::ProcessorCount)")
+          $report.Add('## Memory')
+          if ($IsWindows) {
+            $machine = Get-CimInstance Win32_ComputerSystem
+            $report.Add("Total RAM (GiB): $([math]::Round($machine.TotalPhysicalMemory / 1GB, 2))")
+          } else {
+            $report.Add('```text')
+            $report.Add(((& free -h) -join "`n"))
+            $report.Add('```')
+          }
+          $report.Add('## Filesystems')
+          $report.Add('Do not add capacities together: several paths may refer to the same disk.')
+          $report.Add('```text')
+          $disks = Get-PSDrive -PSProvider FileSystem | Select-Object Name, Root,
+            @{Name='UsedGiB';Expression={[math]::Round($_.Used / 1GB, 2)}},
+            @{Name='FreeGiB';Expression={[math]::Round($_.Free / 1GB, 2)}}
+          $report.Add(($disks | Format-Table -AutoSize | Out-String).Trim())
+          $report.Add('```')
+          $workspace = Get-Item -LiteralPath $env:GITHUB_WORKSPACE
+          $workspaceFree = [math]::Round($workspace.PSDrive.Free / 1GB, 2)
+          $report.Add("Workspace path: $env:GITHUB_WORKSPACE")
+          $report.Add("Workspace free space (GiB): $workspaceFree")
+          $report.Add('## Available commands')
+          foreach ($tool in @('git', 'python', 'python3', 'rustc', 'clang', 'clang-cl', 'cmake', 'ninja')) {
+            $command = Get-Command $tool -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($command) {
+              $report.Add("- ${tool}: $($command.Source)")
+            } else {
+              $report.Add("- ${tool}: not in PATH (not necessarily absent)")
+            }
+          }
+          $report.Add('## Interpretation')
+          $report.Add('Success means inspection completed. It does not mean Firefox can be built here.')
+          $report.Add('No source checkout, installation, cleanup, build, cache or artifact upload was performed.')
+          $text = $report -join "`n`n"
+          Write-Output $text
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $text -Encoding utf8
+
+      - name: Measure selected preinstalled Linux tool directories
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '\n## Selected Linux tool directories\n\n'
+            printf 'Sizes only; nothing is deleted. These figures do not guarantee reclaimable space.\n\n'
+            printf '```text\n'
+            for path in /opt/hostedtoolcache /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/ghc; do
+              if [ -d "$path" ]; then
+                sudo du -sh -- "$path"
+              fi
+            done
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
